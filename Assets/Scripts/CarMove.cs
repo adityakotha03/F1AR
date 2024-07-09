@@ -2,6 +2,8 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.XR.ARFoundation;
+using UnityEngine.XR.ARSubsystems;
+using System;
 
 [System.Serializable]
 public class LocationData
@@ -18,54 +20,37 @@ public class LocationData
 public class CarMove : MonoBehaviour
 {
     public GameObject F1CarObject;
-    public GameObject trackPrefab;
+    public GameObject objectToPlace;
+    public GameObject placementIndicator;
     public string jsonFileName = "location";
+    public float updateInterval = 0.05f; // Interval in seconds
+    public float smoothTime = 0.1F;
+
     private List<LocationData> locationDataList;
     private int currentIndex = 0;
-    public float updateInterval = 0.05f; // Interval in seconds
+    private Vector3 velocity = Vector3.zero;
+    private ARSession arSession;
+    private ARRaycastManager arRaycastManager;
+    private Pose placementPose;
+    private bool placementPoseIsValid = false;
+    private List<ARRaycastHit> hits = new List<ARRaycastHit>();
 
-    [SerializeField]
-    ARRaycastManager m_RaycastManager;
-    List<ARRaycastHit> m_Hit = new List<ARRaycastHit>();
-    public Camera arCam;
-    private GameObject spawnedCar;
-    private GameObject spawnedTrack;
-
-    // Start is called before the first frame update
     void Start()
     {
         LoadLocationData();
+        arSession = FindObjectOfType<ARSession>();
+        arRaycastManager = FindObjectOfType<ARRaycastManager>();
+        StartCoroutine(UpdateCarPositionRoutine());
     }
 
     void Update()
     {
-        if (Input.touchCount == 0)
-            return;
-        
-        Ray ray = arCam.ScreenPointToRay(Input.GetTouch(0).position);
+        UpdatePlacementPose();
+        UpdatePlacementIndicator();
 
-        if (m_RaycastManager.Raycast(Input.GetTouch(0).position, m_Hit))
+        if (placementPoseIsValid && Input.touchCount > 0 && Input.GetTouch(0).phase == TouchPhase.Began)
         {
-            if (Input.GetTouch(0).phase == TouchPhase.Began && spawnedCar == null && spawnedTrack == null)
-            {
-                if (Physics.Raycast(ray, out RaycastHit hit))
-                {
-                    if (hit.collider.gameObject.tag == "Spawnable")
-                    {
-                        spawnedCar = hit.collider.gameObject;
-                    }
-                    else
-                    {
-                        SpawnCarAndTrack(m_Hit[0].pose.position);
-                    }
-                }
-            }
-            else if (Input.GetTouch(0).phase == TouchPhase.Moved && spawnedCar != null && spawnedTrack != null)
-            {
-                Vector3 newPosition = m_Hit[0].pose.position;
-                spawnedCar.transform.position = newPosition;
-                spawnedTrack.transform.position = newPosition;
-            }
+            PlaceObject();
         }
     }
 
@@ -94,7 +79,7 @@ public class CarMove : MonoBehaviour
 
     void UpdateCarPosition()
     {
-        if (currentIndex >= locationDataList.Count || spawnedCar == null) return;
+        if (currentIndex >= locationDataList.Count) return;
 
         LocationData currentData = locationDataList[currentIndex];
         
@@ -105,16 +90,18 @@ public class CarMove : MonoBehaviour
         Vector3 rotatedPosition = RotatePointAroundOrigin(originalPosition, new Vector3(90, 0, 0));
 
         // Calculate direction
-        Vector3 direction = rotatedPosition - spawnedCar.transform.position;
+        Vector3 direction = rotatedPosition - F1CarObject.transform.position;
         if (direction != Vector3.zero)
         {
-            // Calculate rotation towards the direction while maintaining the 180-degree y-axis rotation because the car is pointed in the opp direction in the model
+            // Calculate rotation towards the direction while maintaining the 90-degree x-axis rotation
             Quaternion toRotation = Quaternion.LookRotation(direction, Vector3.up);
-            Quaternion yRotation = Quaternion.Euler(0, 180, 0);
-            spawnedCar.transform.rotation = toRotation * yRotation;
+            Quaternion xRotation = Quaternion.Euler(0, 180, 0);
+            F1CarObject.transform.rotation = toRotation * xRotation;
         }
 
-        spawnedCar.transform.position = rotatedPosition;
+        // Smoothly move the car object to the new position
+        F1CarObject.transform.position = Vector3.SmoothDamp(F1CarObject.transform.position, rotatedPosition, ref velocity, smoothTime);
+        // F1CarObject.transform.position = rotatedPosition;
     }
 
     Vector3 RotatePointAroundOrigin(Vector3 point, Vector3 angles)
@@ -128,11 +115,38 @@ public class CarMove : MonoBehaviour
         return "{\"Items\":" + json + "}";
     }
 
-    private void SpawnCarAndTrack(Vector3 spawnPosition)
+    private void PlaceObject()
     {
-        spawnedCar = Instantiate(F1CarObject, spawnPosition, Quaternion.identity);
-        spawnedTrack = Instantiate(trackPrefab, spawnPosition, Quaternion.identity);
-        StartCoroutine(UpdateCarPositionRoutine());
+        Instantiate(objectToPlace, placementPose.position, placementPose.rotation);
+    }
+
+    private void UpdatePlacementIndicator()
+    {
+        if (placementPoseIsValid)
+        {
+            placementIndicator.SetActive(true);
+            placementIndicator.transform.SetPositionAndRotation(placementPose.position, placementPose.rotation);
+        }
+        else
+        {
+            placementIndicator.SetActive(false);
+        }
+    }
+
+    private void UpdatePlacementPose()
+    {
+        var screenCenter = Camera.current.ViewportToScreenPoint(new Vector3(0.5f, 0.5f));
+        arRaycastManager.Raycast(screenCenter, hits, TrackableType.Planes);
+
+        placementPoseIsValid = hits.Count > 0;
+        if (placementPoseIsValid)
+        {
+            placementPose = hits[0].pose;
+
+            var cameraForward = Camera.current.transform.forward;
+            var cameraBearing = new Vector3(cameraForward.x, 0, cameraForward.z).normalized;
+            placementPose.rotation = Quaternion.LookRotation(cameraBearing);
+        }
     }
 }
 
